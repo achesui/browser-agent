@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import os
 import shutil
 import sys
 import tempfile
-import traceback
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -15,7 +15,8 @@ from typing import Any
 from uuid import uuid4
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, create_model
 
 from browser_use import Agent, BrowserProfile, BrowserSession
@@ -27,6 +28,7 @@ DEFAULT_MAX_CONCURRENCY = 1
 DEFAULT_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
 DEFAULT_JOB_TIMEOUT_SECONDS = 30 * 60
 LOCAL_HOST = "127.0.0.1"
+SIDECAR_TOKEN_ENV = "IMPRETION_BROWSER_AGENT_TOKEN"
 
 
 def utc_now() -> str:
@@ -128,17 +130,6 @@ class JobResultResponse(BaseModel):
     current_url: str | None = None
     current_title: str | None = None
     steps_taken: int = 0
-    urls: list[str | None] = Field(default_factory=list)
-    actions: list[dict[str, Any]] = Field(default_factory=list)
-    extracted_content: list[str] = Field(default_factory=list)
-    errors: list[str | None] = Field(default_factory=list)
-    downloaded_files: list[str] = Field(default_factory=list)
-    screenshots: list[str] = Field(default_factory=list)
-    visited_pages: list[str] = Field(default_factory=list)
-    actions_summary: list[str] = Field(default_factory=list)
-    reasoning_summary: str = ""
-    has_errors: bool = False
-    history: dict[str, Any] | None = None
     structured_result: dict[str, Any] | None = None
 
 
@@ -159,7 +150,6 @@ class BrowserJob:
     current_url: str | None = None
     current_title: str | None = None
     steps_taken: int = 0
-    history: dict[str, Any] | None = None
     final_result: str = ""
     success: bool = False
     urls: list[str | None] = field(default_factory=list)
@@ -168,10 +158,6 @@ class BrowserJob:
     errors: list[str | None] = field(default_factory=list)
     downloaded_files: list[str] = field(default_factory=list)
     screenshots: list[str] = field(default_factory=list)
-    visited_pages: list[str] = field(default_factory=list)
-    actions_summary: list[str] = field(default_factory=list)
-    reasoning_summary: str = ""
-    has_errors: bool = False
     structured_result: dict[str, Any] | None = None
     agent: Agent[Any, Any] | None = None
     browser_session: BrowserSession | None = None
@@ -394,10 +380,7 @@ class JobManager:
             job.add_event(
                 "job.failed",
                 "Browser job failed",
-                {
-                    "error": error_message,
-                    "traceback": traceback.format_exc(),
-                },
+                {},
                 status="error",
             )
         finally:
@@ -428,7 +411,6 @@ async def on_step_start(job: BrowserJob, agent: Agent[Any, Any]) -> None:
             "step": step,
             "url": url,
             "title": title,
-            "thought": agent_thought(agent),
         },
     )
 
@@ -450,7 +432,7 @@ async def on_step_end(job: BrowserJob, agent: Agent[Any, Any]) -> None:
                 action_summary(action),
                 {
                     "step": step,
-                    "action": action,
+					"actionName": action_name(action),
                 },
             )
         job.actions = actions
@@ -461,7 +443,7 @@ async def on_step_end(job: BrowserJob, agent: Agent[Any, Any]) -> None:
             job.add_event(
                 "data.extracted",
                 "The browser collected information",
-                {"step": step, "content": content},
+				{"step": step},
             )
         job.extracted_content = extracted
 
@@ -480,9 +462,7 @@ async def on_step_end(job: BrowserJob, agent: Agent[Any, Any]) -> None:
             "step": step,
             "url": url,
             "title": title,
-            "error": last_error,
             "durationMs": duration_ms,
-            "thought": agent_thought(agent),
         },
         status=status,
     )
@@ -884,7 +864,6 @@ def capture_history(
     output_model: type[BaseModel] | None = None,
     output_fields: list[PreparedOutputField] | None = None,
 ) -> None:
-    job.history = make_jsonable(safe_call(history.model_dump, None))
     job.success = bool(safe_call(history.is_successful, False))
     job.final_result = safe_call(history.final_result, None) or ""
     job.steps_taken = int(safe_call(history.number_of_steps, job.steps_taken) or job.steps_taken)
@@ -894,10 +873,6 @@ def capture_history(
     job.errors = make_jsonable(safe_call(history.errors, job.errors))
     job.downloaded_files = collect_downloaded_files(job)
     job.screenshots = collect_screenshots(job, history)
-    job.visited_pages = dedupe_strings(job.urls)
-    job.actions_summary = string_list(safe_call(history.action_names, []))
-    job.reasoning_summary = summarize_reasoning(safe_call(history.model_thoughts, []))
-    job.has_errors = bool(safe_call(history.has_errors, False))
     prepared_outputs = output_fields or []
     if prepared_outputs:
         structured = (
@@ -1063,103 +1038,6 @@ def dedupe_strings(values: Any) -> list[str]:
     return output
 
 
-def string_list(values: Any) -> list[str]:
-    if not isinstance(values, list):
-        return []
-
-    output: list[str] = []
-    for value in values:
-        if not isinstance(value, str):
-            continue
-        item = value.strip()
-        if item:
-            output.append(item)
-    return output
-
-
-def summarize_reasoning(thoughts: Any) -> str:
-    if not isinstance(thoughts, list):
-        return ""
-
-    lines: list[str] = []
-    seen: set[str] = set()
-    for index, thought in enumerate(thoughts, start=1):
-        record = thought_to_record(thought)
-        parts = []
-        for key, label in (
-            ("evaluation_previous_goal", "Result"),
-            ("memory", "Context"),
-            ("next_goal", "Next"),
-        ):
-            text = compact_text(record.get(key))
-            if text:
-                parts.append(f"{label}: {text}")
-        if not parts:
-            continue
-        line = f"Step {index}: {'; '.join(parts)}"
-        if line in seen:
-            continue
-        seen.add(line)
-        lines.append(line)
-    return "\n".join(lines[:20])
-
-
-def thought_to_record(value: Any) -> dict[str, Any]:
-    if value is None:
-        return {}
-    if hasattr(value, "model_dump"):
-        dumped = safe_call(value.model_dump, {})
-        return dumped if isinstance(dumped, dict) else {}
-    if isinstance(value, dict):
-        return value
-    return {
-        "evaluation_previous_goal": getattr(value, "evaluation_previous_goal", None),
-        "memory": getattr(value, "memory", None),
-        "next_goal": getattr(value, "next_goal", None),
-    }
-
-
-def compact_text(value: Any) -> str:
-    if isinstance(value, str):
-        return " ".join(value.split())
-    if isinstance(value, list):
-        return "; ".join(compact_text(item) for item in value if compact_text(item))
-    if isinstance(value, dict):
-        return " ".join(json.dumps(value, ensure_ascii=False).split())
-    if value is None:
-        return ""
-    return " ".join(str(value).split())
-
-
-def agent_thought(agent: Agent[Any, Any]) -> dict[str, Any]:
-    output = getattr(agent.state, "last_model_output", None)
-    if output is None:
-        return {}
-
-    if hasattr(output, "model_dump"):
-        data = safe_call(output.model_dump, {})
-    elif isinstance(output, dict):
-        data = output
-    else:
-        data = {
-            "thinking": getattr(output, "thinking", None),
-            "evaluation_previous_goal": getattr(output, "evaluation_previous_goal", None),
-            "memory": getattr(output, "memory", None),
-            "next_goal": getattr(output, "next_goal", None),
-        }
-
-    jsonable = make_jsonable(data)
-    if not isinstance(jsonable, dict):
-        return {}
-
-    return {
-        key: value
-        for key, value in jsonable.items()
-        if key in {"thinking", "evaluation_previous_goal", "memory", "next_goal", "current_plan_item", "plan_update"}
-        and value not in (None, "", [])
-    }
-
-
 def make_jsonable(value: Any) -> Any:
     try:
         return json.loads(json.dumps(value, default=str))
@@ -1183,21 +1061,18 @@ def action_summary(action: dict[str, Any]) -> str:
     return action_name.replace("_", " ").capitalize()
 
 
+def action_name(action: dict[str, Any]) -> str:
+    return next((key for key in action if key != "interacted_element"), "unknown")
+
+
 def result_payload(job: BrowserJob) -> dict[str, Any]:
     return {
         "success": job.success,
-        "finalResult": job.final_result,
-        "error": job.error,
         "currentUrl": job.current_url,
         "currentTitle": job.current_title,
         "stepsTaken": job.steps_taken,
-        "downloadedFiles": job.downloaded_files,
-        "screenshots": job.screenshots,
-        "visitedPages": job.visited_pages,
-        "actionsSummary": job.actions_summary,
-        "reasoningSummary": job.reasoning_summary,
-        "hasErrors": job.has_errors,
-        "structuredResult": job.structured_result,
+        "downloadedFileCount": len(job.downloaded_files),
+        "screenshotCount": len(job.screenshots),
     }
 
 
@@ -1229,17 +1104,6 @@ def result_response(job: BrowserJob) -> JobResultResponse:
         current_url=job.current_url,
         current_title=job.current_title,
         steps_taken=job.steps_taken,
-        urls=job.urls,
-        actions=job.actions,
-        extracted_content=job.extracted_content,
-        errors=job.errors,
-        downloaded_files=job.downloaded_files,
-        screenshots=job.screenshots,
-        visited_pages=job.visited_pages,
-        actions_summary=job.actions_summary,
-        reasoning_summary=job.reasoning_summary,
-        has_errors=job.has_errors,
-        history=job.history,
         structured_result=job.structured_result,
     )
 
@@ -1250,8 +1114,21 @@ manager = JobManager(
 )
 
 
+@app.middleware("http")
+async def authenticate_sidecar(request: Request, call_next: Any) -> Any:
+    if request.url.path == "/health":
+        return await call_next(request)
+    expected = os.environ.get(SIDECAR_TOKEN_ENV, "").strip()
+    provided = request.headers.get("x-impretion-sidecar-token", "")
+    if not expected or not provided or not hmac.compare_digest(expected, provided):
+        return JSONResponse(status_code=401, content={"detail": "Browser sidecar authentication required"})
+    return await call_next(request)
+
+
 @app.on_event("startup")
 async def startup() -> None:
+    if not os.environ.get(SIDECAR_TOKEN_ENV, "").strip():
+        raise RuntimeError(f"{SIDECAR_TOKEN_ENV} is required")
     await manager.start()
 
 
