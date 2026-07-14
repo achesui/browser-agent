@@ -22,6 +22,8 @@ from pydantic import BaseModel, Field, create_model
 from browser_use import Agent, BrowserProfile, BrowserSession
 from browser_use.llm import ChatOpenAI
 
+from dotenv import load_dotenv
+load_dotenv()
 
 DEFAULT_PORT = 9844
 DEFAULT_MAX_CONCURRENCY = 1
