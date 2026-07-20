@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "impretion-browser-agent"
+version = "0.1.0"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+  "browser-use==0.12.6",
+  "fastapi==0.136.1",
+  "openai==2.16.0",
+  "playwright==1.59.0",
+  "psutil==7.2.2",
+  "pydantic==2.12.5",
+  "uvicorn==0.46.0",
+]
+
+[project.optional-dependencies]
+build = ["pyinstaller==6.19.0"]
+test = ["httpx==0.28.1", "pytest==9.0.2", "pytest-asyncio==1.3.0", "mypy==1.19.1"]
+
+[project.scripts]
+impretion-browser-agent = "impretion_browser_agent.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/impretion_browser_agent"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["impretion_browser_agent"]
+
+[[tool.mypy.overrides]]
+module = "psutil"
+ignore_missing_imports = true
