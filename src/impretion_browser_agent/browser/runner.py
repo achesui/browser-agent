@@ -42,13 +42,12 @@ async def run_browser_job(
     output_model = _output_model(job)
     headers = {
         "X-Impretion-Browser-Job-Id": job.browser_job_id,
-        "X-Impretion-Workflow-Execution-Id": job.workflow_execution_id,
-        "X-Impretion-Node-Execution-Id": job.node_execution_id,
-        "X-Impretion-Workflow-Node-Id": job.workflow_node_id,
+        "X-Impretion-Execution-Id": job.execution_id,
+        "X-Impretion-Action-Id": job.action_id,
     }
     try:
         llm = ChatOpenAI(
-            model="workflow.browser_agent",
+            model="browser_agent",
             base_url=f"{config.ai_processor_base_url}/browser-agent/v1",
             api_key=token.get_secret_value(),
             default_headers=headers,

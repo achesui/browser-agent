@@ -39,9 +39,8 @@ class JobStorage:
                     browser_job_id TEXT PRIMARY KEY,
                     request_hash TEXT NOT NULL,
                     request_json TEXT NOT NULL,
-                    workflow_execution_id TEXT NOT NULL,
-                    node_execution_id TEXT NOT NULL UNIQUE,
-                    workflow_node_id TEXT NOT NULL,
+                    execution_id TEXT NOT NULL,
+                    action_id TEXT NOT NULL UNIQUE,
                     status TEXT NOT NULL,
                     queue_position INTEGER,
                     created_at TEXT NOT NULL,
@@ -84,18 +83,18 @@ class JobStorage:
         async with self._lock:
             connection = self._required_connection()
             existing = connection.execute(
-                "SELECT * FROM jobs WHERE browser_job_id=? OR node_execution_id=? LIMIT 1",
-                (job.browser_job_id, job.node_execution_id),
+                "SELECT * FROM jobs WHERE browser_job_id=? OR action_id=? LIMIT 1",
+                (job.browser_job_id, job.action_id),
             ).fetchone()
             if existing is not None:
                 if existing["request_hash"] != job.request_hash:
                     raise ValueError("idempotency conflict")
                 return dict(existing), False
             connection.execute(
-                """INSERT INTO jobs(browser_job_id,request_hash,request_json,workflow_execution_id,node_execution_id,
-                workflow_node_id,status,created_at,sidecar_instance_id) VALUES(?,?,?,?,?,?,'queued',?,?)""",
-                (job.browser_job_id, job.request_hash, job.model_dump_json(), job.workflow_execution_id,
-                 job.node_execution_id, job.workflow_node_id, now, self.instance_id),
+                """INSERT INTO jobs(browser_job_id,request_hash,request_json,execution_id,
+                action_id,status,created_at,sidecar_instance_id) VALUES(?,?,?,?,?,'queued',?,?)""",
+                (job.browser_job_id, job.request_hash, job.model_dump_json(), job.execution_id,
+                 job.action_id, now, self.instance_id),
             )
             connection.commit()
             return dict(connection.execute("SELECT * FROM jobs WHERE browser_job_id=?", (job.browser_job_id,)).fetchone()), True

@@ -56,9 +56,8 @@ class OutputField(StrictModel):
 
 class CreateBrowserJobRequest(StrictModel):
     browser_job_id: str
-    workflow_execution_id: str = Field(min_length=1, max_length=200)
-    node_execution_id: str = Field(min_length=1, max_length=200)
-    workflow_node_id: str = Field(min_length=1, max_length=200)
+    execution_id: str = Field(min_length=1, max_length=200)
+    action_id: str = Field(min_length=1, max_length=200)
     execution_root: str = Field(min_length=1, max_length=4096)
     task: str = Field(min_length=1, max_length=MAX_TASK_CHARS)
     headless: bool
@@ -91,9 +90,8 @@ class CreateBrowserJobRequest(StrictModel):
 class PersistedJob(StrictModel):
     browser_job_id: str
     request_hash: str
-    workflow_execution_id: str
-    node_execution_id: str
-    workflow_node_id: str
+    execution_id: str
+    action_id: str
     execution_root: str
     task: str
     headless: bool
@@ -114,9 +112,8 @@ class JobEvent(StrictModel):
 
 class JobStatusResponse(StrictModel):
     browser_job_id: str
-    workflow_execution_id: str
-    node_execution_id: str
-    workflow_node_id: str
+    execution_id: str
+    action_id: str
     status: JobStatus
     queue_position: int | None = None
     created_at: str

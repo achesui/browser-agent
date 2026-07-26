@@ -7,8 +7,8 @@ from impretion_browser_agent.protocol import CreateBrowserJobRequest
 def valid_request() -> dict[str, object]:
     return {
         "browser_job_id": "019c0000-0000-7000-8000-000000000001",
-        "workflow_execution_id": "execution", "node_execution_id": "execution:node",
-        "workflow_node_id": "node", "execution_root": "/tmp", "task": "browse",
+        "execution_id": "execution", "action_id": "execution:node",
+        "execution_root": "/tmp", "task": "browse",
         "headless": True, "files": [], "output_fields": [], "max_steps": 10,
         "max_actions_per_step": 2, "browser_job_token": "secret-token",
     }

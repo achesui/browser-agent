@@ -122,8 +122,8 @@ def create_app(config: SidecarConfig) -> FastAPI:
 
 async def _status_response(manager: JobManager, row: dict[str, Any]) -> JobStatusResponse:
     return JobStatusResponse(
-        browser_job_id=row["browser_job_id"], workflow_execution_id=row["workflow_execution_id"],
-        node_execution_id=row["node_execution_id"], workflow_node_id=row["workflow_node_id"],
+        browser_job_id=row["browser_job_id"], execution_id=row["execution_id"],
+        action_id=row["action_id"],
         status=JobStatus(row["status"]), queue_position=await manager.queue.position(row["browser_job_id"]),
         created_at=row["created_at"], started_at=row["started_at"], finished_at=row["finished_at"],
         error=row["error"], current_url=row["current_url"], current_title=row["current_title"],
