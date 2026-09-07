@@ -23,46 +23,25 @@ def write_valid_package(
     tmp_path: Path,
     *,
     target: str = "aarch64-apple-darwin",
-    executable_relative_path: str | None = None,
-) -> tuple[Path, Path, Path, Path]:
+) -> tuple[Path, Path]:
     app = tmp_path / "src-tauri"
     resource_root = app / "resources" / "browser-agent"
-    chromium = resource_root / "chromium" / target / "chrome"
-    chromium.parent.mkdir(parents=True)
-    chromium.write_bytes(b"chromium")
     sidecar = app / "binaries" / (
         f"impretion-browser-agent-{target}{build_sidecar.executable_suffix(target)}"
     )
     sidecar.parent.mkdir(parents=True)
     sidecar.write_bytes(b"sidecar")
-    runtime = {
-        "schemaVersion": 1,
-        "playwrightVersion": "1.59.0",
-        "chromiumRevision": "1217",
-        "chromiumVersion": "147.0.7727.15",
-        "targets": {
-            target: {
-                "executableRelativePath": executable_relative_path
-                or chromium.relative_to(resource_root).as_posix(),
-                "sha256": digest(chromium),
-            }
-        },
-    }
-    runtime_path = resource_root / "runtime-manifest.json"
-    runtime_path.write_text(json.dumps(runtime), encoding="utf-8")
     source_lock = {
-        "browserAgentCommit": "abc123",
+        "browserAgentCommit": "0123456789abcdef0123456789abcdef01234567",
         "protocolVersion": 1,
         "sidecarVersion": "0.1.0",
-        "playwrightVersion": "1.59.0",
-        "chromiumRevision": "1217",
         "buildTarget": target,
-        "runtimeManifestSha256": digest(runtime_path),
         "sidecarBinarySha256": digest(sidecar),
     }
     lock_path = resource_root / "source-lock.json"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path.write_text(json.dumps(source_lock), encoding="utf-8")
-    return app, runtime_path, lock_path, chromium
+    return app, lock_path
 
 
 def test_windows_executable_suffix() -> None:
@@ -94,121 +73,63 @@ def test_unsupported_architectures_are_rejected(system: str, machine: str) -> No
         build_sidecar.current_target(system, machine)
 
 
-def test_playwright_version_resolution(tmp_path: Path) -> None:
+def test_project_version_resolution(tmp_path: Path) -> None:
     pyproject = tmp_path / "pyproject.toml"
-    lock = tmp_path / "uv.lock"
-    pyproject.write_text(
-        '[project]\ndependencies = ["playwright==1.59.0", "pytest==9.0.2"]\n',
-        encoding="utf-8",
-    )
-    lock.write_text(
-        'version = 1\n[[package]]\nname = "playwright"\nversion = "1.59.0"\n',
-        encoding="utf-8",
-    )
-    assert build_sidecar.locked_playwright_version(pyproject, lock) == "1.59.0"
+    pyproject.write_text('[project]\nname = "x"\nversion = "0.1.0"\n', encoding="utf-8")
+    assert build_sidecar.project_version(pyproject) == "0.1.0"
 
 
-def test_playwright_lock_mismatch_is_rejected(tmp_path: Path) -> None:
+def test_project_version_missing_is_rejected(tmp_path: Path) -> None:
     pyproject = tmp_path / "pyproject.toml"
-    lock = tmp_path / "uv.lock"
-    pyproject.write_text('[project]\ndependencies = ["playwright==1.59.0"]\n')
-    lock.write_text('[[package]]\nname = "playwright"\nversion = "1.58.0"\n')
-    with pytest.raises(build_sidecar.PackagingError, match="lock mismatch"):
-        build_sidecar.locked_playwright_version(pyproject, lock)
-
-
-def test_chromium_revision_resolution(tmp_path: Path) -> None:
-    manifest = tmp_path / "browsers.json"
-    manifest.write_text(
-        json.dumps(
-            {
-                "browsers": [
-                    {"name": "firefox", "revision": "1", "browserVersion": "1"},
-                    {
-                        "name": "chromium",
-                        "revision": "1217",
-                        "browserVersion": "147.0.7727.15",
-                    },
-                ]
-            }
-        )
-    )
-    assert build_sidecar.playwright_metadata(manifest) == (
-        "1217",
-        "147.0.7727.15",
-    )
-
-
-@pytest.mark.parametrize("contents", ["{", "[]", "{}", '{"browsers": []}'])
-def test_missing_or_malformed_playwright_manifest(
-    tmp_path: Path, contents: str
-) -> None:
-    manifest = tmp_path / "browsers.json"
-    manifest.write_text(contents)
+    pyproject.write_text('[project]\nname = "x"\n', encoding="utf-8")
     with pytest.raises(build_sidecar.PackagingError):
-        build_sidecar.playwright_metadata(manifest)
+        build_sidecar.project_version(pyproject)
 
 
-def test_missing_runtime_manifest(tmp_path: Path) -> None:
-    with pytest.raises(build_sidecar.PackagingError, match="Missing runtime manifest"):
+def test_missing_source_lock(tmp_path: Path) -> None:
+    with pytest.raises(build_sidecar.PackagingError, match="Missing source lock"):
         build_sidecar.verify_artifacts(
-            "aarch64-apple-darwin", "1.59.0", "1217", app_tauri=tmp_path
+            "aarch64-apple-darwin", "0.1.0", app_tauri=tmp_path
         )
 
 
 def test_wrong_target_is_rejected(tmp_path: Path) -> None:
-    app, _, _, _ = write_valid_package(tmp_path)
-    with pytest.raises(build_sidecar.PackagingError, match="target"):
+    app, _ = write_valid_package(tmp_path)
+    with pytest.raises(build_sidecar.PackagingError, match="buildTarget"):
         build_sidecar.verify_artifacts(
-            "x86_64-pc-windows-msvc", "1.59.0", "1217", app_tauri=app
-        )
-
-
-def test_incorrect_chromium_hash_is_rejected(tmp_path: Path) -> None:
-    app, _, _, chromium = write_valid_package(tmp_path)
-    chromium.write_bytes(b"tampered")
-    with pytest.raises(build_sidecar.PackagingError, match="Chromium executable hash"):
-        build_sidecar.verify_artifacts(
-            "aarch64-apple-darwin", "1.59.0", "1217", app_tauri=app
+            "x86_64-pc-windows-msvc", "0.1.0", app_tauri=app
         )
 
 
 def test_incorrect_sidecar_hash_is_rejected(tmp_path: Path) -> None:
-    app, _, _, _ = write_valid_package(tmp_path)
+    app, _ = write_valid_package(tmp_path)
     sidecar = app / "binaries" / "impretion-browser-agent-aarch64-apple-darwin"
     sidecar.write_bytes(b"tampered")
     with pytest.raises(build_sidecar.PackagingError, match="sidecar hash"):
         build_sidecar.verify_artifacts(
-            "aarch64-apple-darwin", "1.59.0", "1217", app_tauri=app
-        )
-
-
-def test_path_traversal_is_rejected(tmp_path: Path) -> None:
-    app, _, _, _ = write_valid_package(
-        tmp_path, executable_relative_path="../../../../outside/chrome"
-    )
-    with pytest.raises(build_sidecar.PackagingError, match="escapes"):
-        build_sidecar.verify_artifacts(
-            "aarch64-apple-darwin", "1.59.0", "1217", app_tauri=app
+            "aarch64-apple-darwin", "0.1.0", app_tauri=app
         )
 
 
 def test_successful_packaging_validation(tmp_path: Path) -> None:
-    app, _, _, _ = write_valid_package(tmp_path)
+    app, _ = write_valid_package(tmp_path)
     build_sidecar.verify_artifacts(
-        "aarch64-apple-darwin", "1.59.0", "1217", app_tauri=app
+        "aarch64-apple-darwin", "0.1.0", app_tauri=app
     )
 
 
 def test_build_commands_use_active_python(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     calls: list[list[str]] = []
+    output = tmp_path / "dist" / "impretion-browser-agent.exe"
 
     def run(command: list[str], **_: object) -> None:
         calls.append(command)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"sidecar")
 
     monkeypatch.setattr(build_sidecar.subprocess, "run", run)
     monkeypatch.setattr(build_sidecar, "ROOT", tmp_path)
-    output = tmp_path / "dist" / "impretion-browser-agent.exe"
+    (tmp_path / "browser-agent.spec").write_text("# stub", encoding="utf-8")
     output.parent.mkdir()
     output.write_bytes(b"sidecar")
     build_sidecar.build_sidecar("x86_64-pc-windows-msvc")
@@ -219,47 +140,6 @@ def test_build_commands_use_active_python(monkeypatch: pytest.MonkeyPatch, tmp_p
             "PyInstaller",
             "--noconfirm",
             "--clean",
-            "browser-agent.spec",
+            str(tmp_path / "browser-agent.spec"),
         ]
     ]
-
-
-def test_chromium_download_uses_active_python(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    calls: list[tuple[list[str], dict[str, object]]] = []
-
-    def run(command: list[str], **kwargs: object) -> None:
-        calls.append((command, kwargs))
-
-    monkeypatch.setattr(build_sidecar.subprocess, "run", run)
-    monkeypatch.setattr(build_sidecar, "ROOT", tmp_path)
-    monkeypatch.setenv("PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD", "1")
-    executable = (
-        tmp_path
-        / "build"
-        / "playwright-browsers"
-        / "chromium-1217"
-        / "chrome-mac-arm64"
-        / "chrome"
-    )
-    executable.parent.mkdir(parents=True)
-    executable.write_bytes(b"chromium")
-
-    chromium_root, found_executable = build_sidecar.download_chromium("1217")
-
-    assert chromium_root == executable.parent
-    assert found_executable == executable
-    assert calls[0][0] == [
-        build_sidecar.sys.executable,
-        "-m",
-        "playwright",
-        "install",
-        "chromium",
-    ]
-    environment = calls[0][1]["env"]
-    assert isinstance(environment, dict)
-    assert "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD" not in environment
-    assert environment["PLAYWRIGHT_BROWSERS_PATH"] == str(
-        tmp_path / "build" / "playwright-browsers"
-    )

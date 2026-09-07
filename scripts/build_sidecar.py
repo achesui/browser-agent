@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib.metadata
 import json
 import os
 import platform
@@ -128,15 +127,12 @@ def load_toml(path: Path, description: str) -> dict[str, Any]:
     return value
 
 
-def project_metadata(
+def project_version(
     pyproject_path: Path | None = None,
-    lock_path: Path | None = None,
-) -> tuple[str, str]:
+) -> str:
     pyproject_path = pyproject_path or ROOT / "pyproject.toml"
-    lock_path = lock_path or ROOT / "uv.lock"
 
     pyproject = load_toml(pyproject_path, "pyproject.toml")
-    lock = load_toml(lock_path, "uv.lock")
 
     project = pyproject.get("project")
     if not isinstance(project, dict):
@@ -150,114 +146,10 @@ def project_metadata(
             "pyproject.toml must define project.version"
         )
 
-    dependencies = project.get("dependencies")
-    if not isinstance(dependencies, list):
-        raise PackagingError(
-            "pyproject.toml project.dependencies must be a list"
-        )
-
-    pins = [
-        dependency.removeprefix("playwright==")
-        for dependency in dependencies
-        if isinstance(dependency, str)
-        and dependency.startswith("playwright==")
-    ]
-
-    if len(pins) != 1 or not pins[0]:
-        raise PackagingError(
-            "pyproject.toml must contain exactly one exact "
-            "playwright==VERSION dependency"
-        )
-
-    lock_versions = [
-        package.get("version")
-        for package in lock.get("package", [])
-        if isinstance(package, dict)
-        and package.get("name") == "playwright"
-    ]
-
-    if lock_versions != [pins[0]]:
-        raise PackagingError(
-            f"Playwright lock mismatch: pyproject.toml pins {pins[0]!r}, "
-            f"uv.lock contains {lock_versions!r}"
-        )
-
-    return sidecar_version, pins[0]
+    return sidecar_version
 
 
-def playwright_browser_manifest_path() -> Path:
-    try:
-        distribution = importlib.metadata.distribution("playwright")
-    except importlib.metadata.PackageNotFoundError as error:
-        raise PackagingError(
-            "Playwright is not installed in the active Python environment"
-        ) from error
-
-    manifest_path = Path(
-        str(
-            distribution.locate_file(
-                "playwright/driver/package/browsers.json"
-            )
-        )
-    )
-
-    if not manifest_path.is_file():
-        raise PackagingError(
-            "Installed Playwright browser manifest is missing: "
-            f"{manifest_path}"
-        )
-
-    return manifest_path
-
-
-def playwright_metadata(
-    manifest_path: Path | None = None,
-) -> tuple[str, str]:
-    manifest = load_json(
-        manifest_path or playwright_browser_manifest_path(),
-        "installed Playwright browser manifest",
-    )
-
-    browsers = manifest.get("browsers")
-    if not isinstance(browsers, list):
-        raise PackagingError(
-            "Malformed Playwright browser manifest: "
-            "'browsers' must be a list"
-        )
-
-    chromium = next(
-        (
-            entry
-            for entry in browsers
-            if isinstance(entry, dict)
-            and entry.get("name") == "chromium"
-        ),
-        None,
-    )
-
-    if chromium is None:
-        raise PackagingError(
-            "Installed Playwright browser manifest "
-            "has no Chromium entry"
-        )
-
-    revision = chromium.get("revision")
-    browser_version = chromium.get("browserVersion")
-
-    if (
-        not isinstance(revision, str)
-        or not revision
-        or not isinstance(browser_version, str)
-        or not browser_version
-    ):
-        raise PackagingError(
-            "Installed Playwright Chromium metadata is incomplete"
-        )
-
-    return revision, browser_version
-
-
-def validate_locked_dependencies() -> tuple[str, str]:
+def validate_locked_dependencies() -> str:
     uv = shutil.which("uv")
     if uv is None:
         raise PackagingError(
@@ -270,91 +162,7 @@ def validate_locked_dependencies() -> tuple[str, str]:
         cwd=ROOT,
     )
 
-    sidecar_version, locked_playwright = project_metadata()
-
-    try:
-        installed_playwright = importlib.metadata.version("playwright")
-    except importlib.metadata.PackageNotFoundError as error:
-        raise PackagingError(
-            "Playwright is not installed in the active Python environment"
-        ) from error
-
-    if installed_playwright != locked_playwright:
-        raise PackagingError(
-            f"Installed Playwright {installed_playwright} does not match "
-            f"locked version {locked_playwright}"
-        )
-
-    return sidecar_version, locked_playwright
-
-
-def find_chromium_executable(source_root: Path) -> Path:
-    executable_names = {
-        "chrome.exe",
-        "Google Chrome for Testing",
-        "chrome",
-        "Chromium",
-    }
-
-    candidates = sorted(
-        (
-            path
-            for path in source_root.rglob("*")
-            if path.is_file()
-            and path.name in executable_names
-        ),
-        key=lambda path: path.as_posix(),
-    )
-
-    if not candidates:
-        raise PackagingError(
-            f"Chromium executable is missing below {source_root}"
-        )
-
-    return candidates[0]
-
-
-def download_chromium(revision: str) -> tuple[Path, Path]:
-    browser_cache = ROOT / "build" / "playwright-browsers"
-
-    environment = dict(os.environ)
-    environment.pop("PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD", None)
-    environment["PLAYWRIGHT_BROWSERS_PATH"] = str(browser_cache)
-
-    subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "playwright",
-            "install",
-            "chromium",
-        ],
-        check=True,
-        cwd=ROOT,
-        env=environment,
-    )
-
-    source_root = browser_cache / f"chromium-{revision}"
-
-    if not source_root.is_dir():
-        raise PackagingError(
-            "Playwright did not install expected Chromium revision "
-            f"{revision}"
-        )
-
-    executable = find_chromium_executable(source_root)
-
-    platform_root = executable
-    while platform_root.parent != source_root:
-        platform_root = platform_root.parent
-
-    if platform_root == source_root:
-        raise PackagingError(
-            "Cannot determine Chromium platform directory below "
-            f"{source_root}"
-        )
-
-    return platform_root, executable
+    return project_version()
 
 
 def build_sidecar(target: str) -> Path:
@@ -397,33 +205,10 @@ def build_sidecar(target: str) -> Path:
     return output
 
 
-def replace_tree(source: Path, destination: Path) -> None:
-    if not source.is_dir():
-        raise PackagingError(
-            f"Source directory is missing: {source}"
-        )
-
-    if destination.exists():
-        shutil.rmtree(destination)
-
-    destination.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    shutil.copytree(
-        source,
-        destination,
-        symlinks=True,
-    )
-
-
-def copy_artifacts(
+def copy_sidecar(
     target: str,
     sidecar_source: Path,
-    chromium_source: Path,
-    chromium_executable: Path,
-) -> tuple[Path, Path]:
+) -> Path:
     require_supported_target(target)
 
     if not APP_TAURI.is_dir():
@@ -455,78 +240,7 @@ def copy_artifacts(
     if target != "x86_64-pc-windows-msvc":
         sidecar.chmod(0o755)
 
-    chromium_parent = RESOURCE_ROOT / "chromium"
-
-    if chromium_parent.exists():
-        shutil.rmtree(chromium_parent)
-
-    chromium_target = chromium_parent / target
-
-    replace_tree(
-        chromium_source,
-        chromium_target,
-    )
-
-    relative_executable = chromium_executable.relative_to(
-        chromium_source
-    )
-
-    installed_executable = (
-        chromium_target / relative_executable
-    )
-
-    if not installed_executable.is_file():
-        raise PackagingError(
-            "Copied Chromium executable is missing: "
-            f"{installed_executable}"
-        )
-
-    return sidecar, installed_executable
-
-
-def safe_resource_relative(
-    path: Path,
-    resource_root: Path | None = None,
-) -> Path:
-    root = (resource_root or RESOURCE_ROOT).resolve()
-    resolved = path.resolve()
-
-    try:
-        return resolved.relative_to(root)
-    except ValueError as error:
-        raise PackagingError(
-            "Path escapes Browser Agent resource directory: "
-            f"{path}"
-        ) from error
-
-
-def resolve_manifest_executable(
-    relative_value: object,
-    resource_root: Path | None = None,
-) -> Path:
-    root = (resource_root or RESOURCE_ROOT).resolve()
-
-    if not isinstance(relative_value, str) or not relative_value:
-        raise PackagingError(
-            "Runtime manifest has an invalid "
-            "Chromium executable path"
-        )
-
-    candidate = Path(relative_value)
-
-    if candidate.is_absolute():
-        raise PackagingError(
-            "Runtime manifest Chromium path must be relative"
-        )
-
-    resolved = (root / candidate).resolve()
-
-    safe_resource_relative(
-        resolved,
-        root,
-    )
-
-    return resolved
+    return sidecar
 
 
 def source_commit() -> str:
@@ -550,46 +264,16 @@ def source_commit() -> str:
     return commit
 
 
-def write_manifests(
+def write_source_lock(
     target: str,
     sidecar: Path,
-    chromium_executable: Path,
     sidecar_version: str,
-    playwright_version: str,
-    chromium_revision: str,
-    chromium_version: str,
-) -> tuple[Path, Path]:
+) -> Path:
     require_supported_target(target)
-
-    executable_relative = safe_resource_relative(
-        chromium_executable
-    )
 
     RESOURCE_ROOT.mkdir(
         parents=True,
         exist_ok=True,
-    )
-
-    runtime_path = RESOURCE_ROOT / "runtime-manifest.json"
-
-    runtime = {
-        "schemaVersion": 1,
-        "playwrightVersion": playwright_version,
-        "chromiumRevision": chromium_revision,
-        "chromiumVersion": chromium_version,
-        "targets": {
-            target: {
-                "executableRelativePath": (
-                    executable_relative.as_posix()
-                ),
-                "sha256": sha256(chromium_executable),
-            }
-        },
-    }
-
-    runtime_path.write_text(
-        json.dumps(runtime, indent=2) + "\n",
-        encoding="utf-8",
     )
 
     source_lock_path = RESOURCE_ROOT / "source-lock.json"
@@ -598,11 +282,7 @@ def write_manifests(
         "browserAgentCommit": source_commit(),
         "protocolVersion": 1,
         "sidecarVersion": sidecar_version,
-        "playwrightVersion": playwright_version,
-        "chromiumRevision": chromium_revision,
-        "chromiumVersion": chromium_version,
         "buildTarget": target,
-        "runtimeManifestSha256": sha256(runtime_path),
         "sidecarBinarySha256": sha256(sidecar),
     }
 
@@ -611,15 +291,12 @@ def write_manifests(
         encoding="utf-8",
     )
 
-    return runtime_path, source_lock_path
+    return source_lock_path
 
 
 def verify_artifacts(
     target: str,
     sidecar_version: str,
-    playwright_version: str,
-    chromium_revision: str,
-    chromium_version: str,
     *,
     app_tauri: Path | None = None,
 ) -> None:
@@ -633,19 +310,9 @@ def verify_artifacts(
         / "browser-agent"
     )
 
-    runtime_path = (
-        resource_root
-        / "runtime-manifest.json"
-    )
-
     source_lock_path = (
         resource_root
         / "source-lock.json"
-    )
-
-    runtime = load_json(
-        runtime_path,
-        "runtime manifest",
     )
 
     source_lock = load_json(
@@ -653,43 +320,10 @@ def verify_artifacts(
         "source lock",
     )
 
-    if runtime.get("schemaVersion") != 1:
-        raise PackagingError(
-            "Runtime manifest schemaVersion must be 1"
-        )
-
-    targets = runtime.get("targets")
-
-    if not isinstance(targets, dict):
-        raise PackagingError(
-            "Runtime manifest targets must be an object"
-        )
-
-    if set(targets) != {target}:
-        raise PackagingError(
-            "Runtime manifest must contain only "
-            "the current build target"
-        )
-
-    expected_runtime_values = {
-        "playwrightVersion": playwright_version,
-        "chromiumRevision": chromium_revision,
-        "chromiumVersion": chromium_version,
-    }
-
-    for name, expected in expected_runtime_values.items():
-        if runtime.get(name) != expected:
-            raise PackagingError(
-                f"Runtime manifest {name} does not match "
-                "the package metadata"
-            )
-
-    expected_lock_values = {
+    expected_lock_values: dict[str, Any] = {
         "buildTarget": target,
         "sidecarVersion": sidecar_version,
-        "playwrightVersion": playwright_version,
-        "chromiumRevision": chromium_revision,
-        "chromiumVersion": chromium_version,
+        "protocolVersion": 1,
     }
 
     for name, expected in expected_lock_values.items():
@@ -698,30 +332,6 @@ def verify_artifacts(
                 f"Source lock {name} does not match "
                 "the package metadata"
             )
-
-    target_entry = targets.get(target)
-
-    if not isinstance(target_entry, dict):
-        raise PackagingError(
-            "Runtime manifest has no valid entry "
-            f"for target {target}"
-        )
-
-    chromium = resolve_manifest_executable(
-        target_entry.get("executableRelativePath"),
-        resource_root,
-    )
-
-    if not chromium.is_file():
-        raise PackagingError(
-            "Bundled Chromium executable is missing: "
-            f"{chromium}"
-        )
-
-    if target_entry.get("sha256") != sha256(chromium):
-        raise PackagingError(
-            "Bundled Chromium executable hash is incorrect"
-        )
 
     sidecar = (
         app_root
@@ -745,69 +355,44 @@ def verify_artifacts(
             "Bundled Browser Agent sidecar hash is incorrect"
         )
 
-    if source_lock.get(
-        "runtimeManifestSha256"
-    ) != sha256(runtime_path):
+    commit = source_lock.get("browserAgentCommit")
+    if (
+        not isinstance(commit, str)
+        or len(commit) != 40
+        or not all(byte in "0123456789abcdefABCDEF" for byte in commit)
+    ):
         raise PackagingError(
-            "Runtime manifest hash is incorrect"
+            "Source lock has no valid browserAgentCommit"
         )
 
 
 def package() -> None:
     target = current_target()
 
-    (
-        sidecar_version,
-        playwright_version,
-    ) = validate_locked_dependencies()
-
-    (
-        chromium_revision,
-        chromium_version,
-    ) = playwright_metadata()
-
-    (
-        chromium_root,
-        chromium_executable,
-    ) = download_chromium(
-        chromium_revision
-    )
+    sidecar_version = validate_locked_dependencies()
 
     sidecar_output = build_sidecar(target)
 
-    (
-        sidecar,
-        installed_chromium,
-    ) = copy_artifacts(
+    sidecar = copy_sidecar(
         target,
         sidecar_output,
-        chromium_root,
-        chromium_executable,
     )
 
-    write_manifests(
+    write_source_lock(
         target,
         sidecar,
-        installed_chromium,
         sidecar_version,
-        playwright_version,
-        chromium_revision,
-        chromium_version,
     )
 
     verify_artifacts(
         target,
         sidecar_version,
-        playwright_version,
-        chromium_revision,
-        chromium_version,
     )
 
     print(
         f"Browser Agent package verified for {target}"
     )
     print(f"Sidecar: {sidecar}")
-    print(f"Chromium: {installed_chromium}")
 
 
 def main() -> None:
@@ -821,7 +406,7 @@ def main() -> None:
         "action",
         choices=("package",),
         help=(
-            "Build, copy, manifest and verify "
+            "Build, copy and verify "
             "the native package"
         ),
     )

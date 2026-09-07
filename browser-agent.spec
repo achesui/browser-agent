@@ -3,12 +3,12 @@ from PyInstaller.utils.hooks import collect_all, copy_metadata
 datas = []
 binaries = []
 hiddenimports = []
-for package in ("browser_use", "playwright", "pydantic", "uvicorn", "fastapi", "certifi"):
+for package in ("browser_use", "pydantic", "certifi"):
     package_datas, package_binaries, package_hiddenimports = collect_all(package)
     datas += package_datas
     binaries += package_binaries
     hiddenimports += package_hiddenimports
-for distribution in ("browser-use", "playwright", "pydantic", "uvicorn", "fastapi", "certifi"):
+for distribution in ("browser-use", "pydantic", "certifi"):
     datas += copy_metadata(distribution)
 
 analysis = Analysis(

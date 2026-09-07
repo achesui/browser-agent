@@ -1,163 +1,162 @@
+"""Versioned NDJSON protocol between the desktop Runtime and the worker.
+
+Mirrors ``worker_process.rs`` exactly: Runtime messages arrive on stdin, worker
+messages leave on stdout, one JSON object per line. Both directions accept
+only ``WORKER_PROTOCOL_VERSION``.
+
+Diagnostics never carry message content: payloads may hold secrets, so every
+error is a content-free shape (``malformed``, ``version-mismatch`` or
+``unknown-type``).
+"""
+
 from __future__ import annotations
 
-from enum import StrEnum
-from typing import Any, Literal
+import json
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
+WORKER_PROTOCOL_VERSION = 1
 
-BROWSER_AGENT_PROTOCOL_VERSION = 1
-SIDECAR_VERSION = "0.1.0"
-READY_PREFIX = "IMPRETION_SIDECAR_READY "
-
-MAX_TASK_CHARS = 100_000
-MAX_FILES = 32
-MAX_FILE_BYTES = 100 * 1024 * 1024
-MAX_TOTAL_FILE_BYTES = 256 * 1024 * 1024
-MAX_OUTPUT_FIELDS = 64
+_RUNTIME_TYPES = ("start", "ack", "cancel", "signal", "upload")
+_SIGNALS = ("done", "failed")
 
 
-class JobStatus(StrEnum):
-    QUEUED = "queued"
-    RUNNING = "running"
-    CANCELLING = "cancelling"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
-    INTERRUPTED = "interrupted"
+class ProtocolError(Exception):
+    """Content-free wire failure. Never embeds the offending bytes."""
+
+    MALFORMED = "malformed"
+    VERSION_MISMATCH = "version-mismatch"
+    UNKNOWN_TYPE = "unknown-type"
+
+    def __init__(self, kind: str) -> None:
+        super().__init__(f"browser worker message is {kind}")
+        self.kind = kind
 
 
-TERMINAL_STATUSES = {
-    JobStatus.COMPLETED,
-    JobStatus.FAILED,
-    JobStatus.CANCELLED,
-    JobStatus.INTERRUPTED,
-}
+def decode_runtime_message(line: bytes) -> tuple[str, dict[str, Any]]:
+    """Parse one stdin line into ``(type, fields)``.
+
+    Raises :class:`ProtocolError` without echoing any content.
+    """
+    if line.endswith(b"\r"):
+        line = line[:-1]
+    try:
+        text = line.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ProtocolError(ProtocolError.MALFORMED) from error
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise ProtocolError(ProtocolError.MALFORMED) from error
+    if not isinstance(value, dict):
+        raise ProtocolError(ProtocolError.MALFORMED)
+    version = value.get("v")
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise ProtocolError(ProtocolError.MALFORMED)
+    if version != WORKER_PROTOCOL_VERSION:
+        raise ProtocolError(ProtocolError.VERSION_MISMATCH)
+    message_type = value.get("type")
+    if not isinstance(message_type, str) or message_type not in _RUNTIME_TYPES:
+        raise ProtocolError(
+            ProtocolError.UNKNOWN_TYPE
+            if isinstance(message_type, str)
+            else ProtocolError.MALFORMED
+        )
+    _check_shape(message_type, value)
+    return message_type, value
 
 
-class StrictModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+def _is_nonempty_str(value: Any) -> bool:
+    return isinstance(value, str) and len(value) > 0
 
 
-class BrowserJobFile(StrictModel):
-    id: str = Field(min_length=1, max_length=200)
-    name: str = Field(min_length=1, max_length=255)
-    mime_type: str = Field(default="", alias="mimeType", max_length=255)
-    size: int = Field(ge=1, le=MAX_FILE_BYTES)
-    path: str = Field(min_length=1, max_length=4096)
-    relative_path: str = Field(alias="relativePath", min_length=1, max_length=4096)
+def _check_shape(message_type: str, value: dict[str, Any]) -> None:
+    if message_type == "start":
+        if (
+            not _is_nonempty_str(value.get("run_id"))
+            or not _is_nonempty_str(value.get("process_id"))
+            or not isinstance(value.get("payload"), dict)
+        ):
+            raise ProtocolError(ProtocolError.MALFORMED)
+    elif message_type == "ack":
+        if not _is_nonempty_str(value.get("event_id")):
+            raise ProtocolError(ProtocolError.MALFORMED)
+    elif message_type == "cancel":
+        if not isinstance(value.get("reason"), str):
+            raise ProtocolError(ProtocolError.MALFORMED)
+    elif message_type == "signal":
+        if value.get("signal") not in _SIGNALS:
+            raise ProtocolError(ProtocolError.MALFORMED)
+    elif message_type == "upload":
+        if (
+            not _is_nonempty_str(value.get("event_id"))
+            or not isinstance(value.get("name"), str)
+            or not isinstance(value.get("mime_type"), str)
+            or isinstance(value.get("size_bytes"), bool)
+            or not isinstance(value.get("size_bytes"), int)
+            or (value.get("size_bytes") or 0) < 0
+        ):
+            raise ProtocolError(ProtocolError.MALFORMED)
+        # Exactly one of the two answers travels, never paths.
+        has_data = value.get("data_base64") is not None
+        has_error = value.get("error") is not None
+        if has_data == has_error:
+            raise ProtocolError(ProtocolError.MALFORMED)
 
 
-class OutputField(StrictModel):
-    key: str = Field(min_length=1, max_length=100, pattern=r"^[a-z][a-z_]*$")
-    name: str = Field(min_length=1, max_length=200)
-    description: str = Field(default="", max_length=2_000)
-    output_type: Literal["text", "number", "boolean", "data_table", "file"] = Field(alias="outputType")
+def encode_event(event_id: str, kind: str, payload: Any) -> bytes:
+    """Encode one worker ``event`` stdout line."""
+    if not event_id or not kind:
+        raise ValueError("worker event needs a non-empty id and kind")
+    return (
+        json.dumps(
+            {
+                "v": WORKER_PROTOCOL_VERSION,
+                "type": "event",
+                "id": event_id,
+                "kind": kind,
+                "payload": payload,
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        + b"\n"
+    )
 
 
-class CreateBrowserJobRequest(StrictModel):
-    browser_job_id: str
-    execution_id: str = Field(min_length=1, max_length=200)
-    action_id: str = Field(min_length=1, max_length=200)
-    execution_root: str = Field(min_length=1, max_length=4096)
-    task: str = Field(min_length=1, max_length=MAX_TASK_CHARS)
-    headless: bool
-    files: list[BrowserJobFile] = Field(default_factory=list, max_length=MAX_FILES)
-    output_fields: list[OutputField] = Field(default_factory=list, max_length=MAX_OUTPUT_FIELDS)
-    max_steps: int = Field(ge=1, le=500)
-    max_actions_per_step: int = Field(ge=1, le=8)
-    browser_job_token: SecretStr
-
-    @field_validator("browser_job_id")
-    @classmethod
-    def validate_job_id(cls, value: str) -> str:
-        import uuid
-        try:
-            parsed = uuid.UUID(value)
-        except ValueError as error:
-            raise ValueError("browser_job_id must be a UUID") from error
-        if str(parsed) != value.lower():
-            raise ValueError("browser_job_id must use canonical UUID form")
-        return value
-
-    @field_validator("files")
-    @classmethod
-    def validate_total_file_size(cls, files: list[BrowserJobFile]) -> list[BrowserJobFile]:
-        if sum(file.size for file in files) > MAX_TOTAL_FILE_BYTES:
-            raise ValueError("total input file size exceeds the limit")
-        return files
+def encode_terminal(payload: dict[str, Any]) -> bytes:
+    """Encode the single worker ``terminal`` stdout line."""
+    if not isinstance(payload, dict):
+        raise ValueError("worker terminal payload must be an object")
+    return (
+        json.dumps(
+            {"v": WORKER_PROTOCOL_VERSION, "type": "terminal", "payload": payload},
+            separators=(",", ":"),
+        ).encode("utf-8")
+        + b"\n"
+    )
 
 
-class PersistedJob(StrictModel):
-    browser_job_id: str
-    request_hash: str
-    execution_id: str
-    action_id: str
-    execution_root: str
-    task: str
-    headless: bool
-    files: list[BrowserJobFile]
-    output_fields: list[OutputField]
-    max_steps: int
-    max_actions_per_step: int
+class LineFramer:
+    """Accumulate stdout-bound bytes into complete newline-delimited lines.
 
+    A chunk may hold a partial line, one line, or many; leftovers wait for
+    more bytes. Returned lines exclude the newline (and one trailing CR);
+    blank lines are skipped, mirroring the desktop ``LineFramer``.
+    """
 
-class JobEvent(StrictModel):
-    sequence: int
-    type: str
-    status: str = "info"
-    message: str = ""
-    payload: dict[str, Any] = Field(default_factory=dict)
-    created_at: str
+    def __init__(self) -> None:
+        self._buf = bytearray()
 
-
-class JobStatusResponse(StrictModel):
-    browser_job_id: str
-    execution_id: str
-    action_id: str
-    status: JobStatus
-    queue_position: int | None = None
-    created_at: str
-    started_at: str | None = None
-    finished_at: str | None = None
-    error: str | None = None
-    current_url: str | None = None
-    current_title: str | None = None
-    steps_taken: int = 0
-    sidecar_instance_id: str
-
-
-class JobEventsResponse(StrictModel):
-    browser_job_id: str
-    events: list[JobEvent]
-    latest_sequence: int
-    status: JobStatus
-
-
-class JobResultResponse(StrictModel):
-    browser_job_id: str
-    status: JobStatus
-    success: bool
-    final_result: str
-    error: str | None = None
-    current_url: str | None = None
-    current_title: str | None = None
-    steps_taken: int = 0
-    structured_result: dict[str, Any] | None = None
-
-
-class HealthResponse(StrictModel):
-    status: Literal["ready"]
-    sidecar_version: str
-    protocol_version: int
-    instance_id: str
-    pid: int
-    parent_pid: int
-    browser_ready: bool
-    playwright_version: str
-    chromium_version: str
-    chromium_revision: str
-    build_target: str
-    max_concurrency: int
-    active_jobs: int
-    queued_jobs: int
-
+    def push(self, chunk: bytes) -> list[bytes]:
+        self._buf.extend(chunk)
+        lines: list[bytes] = []
+        while True:
+            end = self._buf.find(b"\n")
+            if end < 0:
+                break
+            raw = bytes(self._buf[:end])
+            del self._buf[: end + 1]
+            if raw.endswith(b"\r"):
+                raw = raw[:-1]
+            if raw:
+                lines.append(raw)
+        return lines

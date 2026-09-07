@@ -1,6 +1,6 @@
-"""Packaged Browser Agent sidecar for Impretion."""
+"""Packaged Browser Agent worker for Impretion (skeleton)."""
 
-from .protocol import BROWSER_AGENT_PROTOCOL_VERSION, SIDECAR_VERSION
+SIDECAR_VERSION = "0.1.0"
+WORKER_PROTOCOL_VERSION = 1
 
-__all__ = ["BROWSER_AGENT_PROTOCOL_VERSION", "SIDECAR_VERSION"]
-
+__all__ = ["SIDECAR_VERSION", "WORKER_PROTOCOL_VERSION"]
